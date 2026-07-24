@@ -87,19 +87,31 @@
     /* スマホはみ出し対策のスクロールラッパー */
     .grid-wrapper {
         max-width: 100%;
-        overflow-x: auto;
+        height: 320px; /* 固定高さを設定するか、初期状態で余裕を持たせる */
+        overflow: hidden;
         background-color: #7b7b7b;
         border-top: 3px solid #7b7b7b;
         border-left: 3px solid #7b7b7b;
         border-right: 3px solid #ffffff;
         border-bottom: 3px solid #ffffff;
-        -webkit-overflow-scrolling: touch;
+        position: relative;
+        touch-action: none; /* デフォルトのスクロールやピンチズームを禁止 */
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: grab;
+    }
+    .grid-wrapper:active {
+        cursor: grabbing;
     }
 
     .grid {
         display: grid;
-        margin: 0 auto;
-        touch-action: manipulation;
+        position: absolute;
+        left: 0;
+        top: 0;
+        transform-origin: 0 0;
+        will-change: transform;
+        touch-action: none;
     }
 
     .cell {
@@ -190,6 +202,29 @@
     .num-6 { color: #008080; }
     .num-7 { color: #000000; }
     .num-8 { color: #808080; }
+
+    /* ズームコントローラー */
+    .zoom-controls {
+        margin-top: 8px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 6px;
+    }
+    .zoom-info {
+        background-color: #000000;
+        color: #00ff00;
+        font-family: 'Courier New', Courier, monospace;
+        font-weight: bold;
+        font-size: 14px;
+        padding: 4px 8px;
+        border-top: 2px solid #7b7b7b;
+        border-left: 2px solid #7b7b7b;
+        border-right: 2px solid #ffffff;
+        border-bottom: 2px solid #ffffff;
+        min-width: 48px;
+        text-align: center;
+    }
 </style>
 </head>
 <body>
@@ -209,6 +244,13 @@
     <div class="mode-selector">
         <button class="action-btn active" id="mode-dig">⛏️ 掘る</button>
         <button class="action-btn" id="mode-flag">🚩 旗 / ❓</button>
+    </div>
+
+    <div class="zoom-controls">
+        <button class="action-btn" id="zoom-out-btn">🔍- 縮小</button>
+        <div class="zoom-info" id="zoom-factor">100%</div>
+        <button class="action-btn" id="zoom-in-btn">🔍+ 拡大</button>
+        <button class="action-btn" id="zoom-reset-btn">等倍</button>
     </div>
 
     <div class="controls">
@@ -237,6 +279,7 @@
     let historyStack = [];  // 行動履歴スタック (Undo用)
 
     const gridEl = document.getElementById('grid');
+    const wrapperEl = document.querySelector('.grid-wrapper');
     const mineCountEl = document.getElementById('mine-count');
     const timerEl = document.getElementById('timer');
     const resetBtn = document.getElementById('reset-btn');
@@ -245,6 +288,53 @@
     const difficultySelect = document.getElementById('difficulty');
     const modeDigBtn = document.getElementById('mode-dig');
     const modeFlagBtn = document.getElementById('mode-flag');
+
+    const zoomOutBtn = document.getElementById('zoom-out-btn');
+    const zoomInBtn = document.getElementById('zoom-in-btn');
+    const zoomResetBtn = document.getElementById('zoom-reset-btn');
+    const zoomFactorEl = document.getElementById('zoom-factor');
+
+    // ズーム＆パンのステート管理
+    let scale = 1.0;
+    let translateX = 0;
+    let translateY = 0;
+    
+    // ドラッグ＆キャンセルフラグ
+    let isDragging = false;
+    let startX = 0;
+    let startY = 0;
+    let hasDragged = false;
+    const DRAG_THRESHOLD = 5; // ピクセル単位
+
+    // 2本指ズーム(ピンチ)ステート
+    let initialPinchDistance = 0;
+    let initialScale = 1.0;
+    let initialPinchCenter = { x: 0, y: 0 };
+
+    function updateTransform() {
+        gridEl.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+        zoomFactorEl.textContent = `${Math.round(scale * 100)}%`;
+    }
+
+    // 任意の画面(またはラッパー相対)座標 (pivotX, pivotY) を中心に、新しい倍率 newScale にズームする
+    function zoomToPoint(newScale, pivotX, pivotY) {
+        newScale = Math.max(0.5, Math.min(4.0, newScale));
+        
+        // ラッパー相対座標でのピボットを、変形前のグリッドのローカル座標に逆算
+        const localX = (pivotX - translateX) / scale;
+        const localY = (pivotY - translateY) / scale;
+        
+        // 新しいスケールでの、同じローカル座標のラッパー内での位置
+        const newPivotX = localX * newScale + translateX;
+        const newPivotY = localY * newScale + translateY;
+        
+        // ピボット位置がずれないように平行移動量を調整
+        translateX += (pivotX - newPivotX);
+        translateY += (pivotY - newPivotY);
+        scale = newScale;
+        
+        updateTransform();
+    }
 
     function init() {
         clearInterval(timerInterval);
@@ -267,6 +357,14 @@
         gridEl.style.gridTemplateColumns = `repeat(${COLS}, 26px)`;
         gridEl.innerHTML = '';
         board = [];
+
+        // ズーム・パン状態を初期状態（等倍かつ左寄せ・中央寄せ基準）にリセット
+        scale = 1.0;
+        translateX = 0;
+        translateY = 0;
+        isDragging = false;
+        hasDragged = false;
+        updateTransform();
 
         for (let r = 0; r < ROWS; r++) {
             let row = [];
@@ -471,8 +569,15 @@
         if (gameOver) return;
         resetBtn.textContent = '🙂';
         
+        // ドラッグ移動を行っていた場合はクリックイベントを無視(誤クリック防止)
+        if (hasDragged) {
+            hasDragged = false;
+            return;
+        }
+
         const r = parseInt(e.target.dataset.r);
         const c = parseInt(e.target.dataset.c);
+        if (isNaN(r) || isNaN(c)) return;
 
         if (e.button === 0) { // 左クリックまたはスマホタップ
             if (currentMode === 'dig') {
@@ -670,6 +775,155 @@
     undoBtn.addEventListener('click', undo);
     answerBtn.addEventListener('click', showAnswer);
     difficultySelect.addEventListener('change', init);
+
+    // ホイールズームイベントの実装
+    wrapperEl.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        
+        // マウスポインタの、ラッパー要素左上からの相対座標を取得
+        const rect = wrapperEl.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        // ホイール方向によりスケールを決定
+        const delta = e.deltaY < 0 ? 1.1 : 0.9;
+        const newScale = scale * delta;
+        zoomToPoint(newScale, mouseX, mouseY);
+    }, { passive: false });
+
+    // 1本指ドラッグ、2本指ピンチズーム用のタッチ＆マウスイベント群
+
+    // マウスドラッグ（パン）の実装
+    wrapperEl.addEventListener('mousedown', (e) => {
+        // セルのドラッグ開始。セル自体が右クリックの場合は除外
+        if (e.button !== 0 && e.button !== 1) return;
+        isDragging = true;
+        startX = e.clientX - translateX;
+        startY = e.clientY - translateY;
+        hasDragged = false;
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const currentX = e.clientX - startX;
+        const currentY = e.clientY - startY;
+        
+        // 移動量がしきい値を超えたかどうか
+        if (Math.abs(currentX - translateX) > DRAG_THRESHOLD || Math.abs(currentY - translateY) > DRAG_THRESHOLD) {
+            hasDragged = true;
+        }
+        
+        translateX = currentX;
+        translateY = currentY;
+        updateTransform();
+    });
+
+    window.addEventListener('mouseup', () => {
+        isDragging = false;
+    });
+
+    // 2つのタッチ点間の距離を計算する
+    function getDistance(t1, t2) {
+        const dx = t1.clientX - t2.clientX;
+        const dy = t1.clientY - t2.clientY;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // 2つのタッチ点の中央座標をラッパー相対で計算する
+    function getTouchCenter(t1, t2, rect) {
+        return {
+            x: ((t1.clientX + t2.clientX) / 2) - rect.left,
+            y: ((t1.clientY + t2.clientY) / 2) - rect.top
+        };
+    }
+
+    // タッチイベント（スマホ対応、ピンチ＆ドラッグパン）
+    wrapperEl.addEventListener('touchstart', (e) => {
+        const rect = wrapperEl.getBoundingClientRect();
+        hasDragged = false;
+
+        if (e.touches.length === 1) {
+            // 1本指でのドラッグ移動開始
+            isDragging = true;
+            startX = e.touches[0].clientX - translateX;
+            startY = e.touches[0].clientY - translateY;
+        } else if (e.touches.length === 2) {
+            // 2本指でのピンチズーム開始
+            isDragging = false; // ピンチ時は1本指ドラッグを停止
+            initialPinchDistance = getDistance(e.touches[0], e.touches[1]);
+            initialScale = scale;
+            initialPinchCenter = getTouchCenter(e.touches[0], e.touches[1], rect);
+        }
+    }, { passive: true });
+
+    wrapperEl.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 1 && isDragging) {
+            // 1本指ドラッグ
+            const currentX = e.touches[0].clientX - startX;
+            const currentY = e.touches[0].clientY - startY;
+
+            if (Math.abs(currentX - translateX) > DRAG_THRESHOLD || Math.abs(currentY - translateY) > DRAG_THRESHOLD) {
+                hasDragged = true;
+            }
+
+            translateX = currentX;
+            translateY = currentY;
+            updateTransform();
+        } else if (e.touches.length === 2) {
+            // 2本指ピンチズーム
+            const currentDistance = getDistance(e.touches[0], e.touches[1]);
+            if (initialPinchDistance > 0) {
+                const rect = wrapperEl.getBoundingClientRect();
+                const currentCenter = getTouchCenter(e.touches[0], e.touches[1], rect);
+
+                // ピンチによる拡大率の計算
+                const pinchFactor = currentDistance / initialPinchDistance;
+                const newScale = initialScale * pinchFactor;
+
+                // 新しい中心点の移動分も加味してズーム
+                zoomToPoint(newScale, currentCenter.x, currentCenter.y);
+                hasDragged = true; // ピンチ時もクリックをキャンセルする
+            }
+        }
+    }, { passive: true });
+
+    wrapperEl.addEventListener('touchend', (e) => {
+        if (e.touches.length === 0) {
+            isDragging = false;
+        } else if (e.touches.length === 1) {
+            // 2本指から1本指に戻った場合の処理
+            isDragging = true;
+            startX = e.touches[0].clientX - translateX;
+            startY = e.touches[0].clientY - translateY;
+        }
+    }, { passive: true });
+
+    wrapperEl.addEventListener('touchcancel', () => {
+        isDragging = false;
+    });
+
+    // ズームボタンの実装
+    zoomInBtn.addEventListener('click', () => {
+        const rect = wrapperEl.getBoundingClientRect();
+        const centerX = rect.width / 2;
+        const centerY = rect.height / 2;
+        zoomToPoint(scale * 1.2, centerX, centerY);
+    });
+
+    zoomOutBtn.addEventListener('click', () => {
+        const rect = wrapperEl.getBoundingClientRect();
+        const centerX = rect.width / 2;
+        const centerY = rect.height / 2;
+        zoomToPoint(scale / 1.2, centerX, centerY);
+    });
+
+    zoomResetBtn.addEventListener('click', () => {
+        scale = 1.0;
+        // グリッドをラッパー内で中央、または左上にリセット
+        translateX = 0;
+        translateY = 0;
+        updateTransform();
+    });
 
     init();
 </script>
