@@ -515,7 +515,7 @@
     }
 
     function isBoardSolvable(startR, startC) {
-        let simState = Array(ROWS).fill(null).map(() => Array(COLS).fill(0));
+        let simState = Array(ROWS).fill(null).map(() => Array(COLS).fill(0)); // 0: unrevealed, 1: revealed, 2: flagged
         let revealedCount = 0;
 
         function simReveal(r, c) {
@@ -536,6 +536,8 @@
         let progress = true;
         while(progress) {
             progress = false;
+
+            // 1. 基本ルール (Single-cell logic)
             for(let r=0; r<ROWS; r++){
                 for(let c=0; c<COLS; c++){
                     if (simState[r][c] === 1 && board[r][c].neighborMines > 0) {
@@ -558,6 +560,113 @@
                         else if (unrevealed.length > 0 && target === flagged) {
                             unrevealed.forEach(cell => { simReveal(cell.r, cell.c); progress = true; });
                         }
+                    }
+                }
+            }
+
+            if (progress) continue;
+
+            // 2. 集合推論 (Subset / Overlap logic)
+            let equations = [];
+            for(let r=0; r<ROWS; r++){
+                for(let c=0; c<COLS; c++){
+                    if (simState[r][c] === 1 && board[r][c].neighborMines > 0) {
+                        let unrevealed = [];
+                        let flagged = 0;
+                        for(let dr=-1; dr<=1; dr++){
+                            for(let dc=-1; dc<=1; dc++){
+                                let nr = r+dr, nc = c+dc;
+                                if(nr>=0 && nr<ROWS && nc>=0 && nc<COLS) {
+                                    if(simState[nr][nc] === 0) {
+                                        unrevealed.push(`${nr},${nc}`);
+                                    }
+                                    if(simState[nr][nc] === 2) {
+                                        flagged++;
+                                    }
+                                }
+                            }
+                        }
+                        let remainingMines = board[r][c].neighborMines - flagged;
+                        if (unrevealed.length > 0) {
+                            equations.push({
+                                cells: new Set(unrevealed),
+                                mines: remainingMines
+                            });
+                        }
+                    }
+                }
+            }
+
+            for (let i = 0; i < equations.length; i++) {
+                for (let j = 0; j < equations.length; j++) {
+                    if (i === j) continue;
+                    let eqA = equations[i];
+                    let eqB = equations[j];
+
+                    // eqA.cells が eqB.cells の真部分集合である場合:
+                    if (eqA.cells.size < eqB.cells.size) {
+                        let isSubset = true;
+                        for (let cell of eqA.cells) {
+                            if (!eqB.cells.has(cell)) {
+                                isSubset = false;
+                                break;
+                            }
+                        }
+
+                        if (isSubset) {
+                            let diffCells = new Set([...eqB.cells].filter(x => !eqA.cells.has(x)));
+                            let diffMines = eqB.mines - eqA.mines;
+
+                            if (diffMines === 0) {
+                                // 差分セルはすべて安全
+                                for (let cellStr of diffCells) {
+                                    let [cr, cc] = cellStr.split(',').map(Number);
+                                    if (simState[cr][cc] === 0) {
+                                        simReveal(cr, cc);
+                                        progress = true;
+                                    }
+                                }
+                            } else if (diffMines === diffCells.size) {
+                                // 差分セルはすべて地雷
+                                for (let cellStr of diffCells) {
+                                    let [cr, cc] = cellStr.split(',').map(Number);
+                                    if (simState[cr][cc] === 0) {
+                                        simState[cr][cc] = 2;
+                                        progress = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (progress) continue;
+
+            // 3. 残りの地雷数による推論 (Global mine count logic)
+            let totalUnrevealed = [];
+            let totalFlagged = 0;
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (simState[r][c] === 0) {
+                        totalUnrevealed.push({r, c});
+                    } else if (simState[r][c] === 2) {
+                        totalFlagged++;
+                    }
+                }
+            }
+
+            let globalRemainingMines = MINES - totalFlagged;
+            if (totalUnrevealed.length > 0) {
+                if (totalUnrevealed.length === globalRemainingMines) {
+                    for (let cell of totalUnrevealed) {
+                        simState[cell.r][cell.c] = 2;
+                        progress = true;
+                    }
+                } else if (globalRemainingMines === 0) {
+                    for (let cell of totalUnrevealed) {
+                        simReveal(cell.r, cell.c);
+                        progress = true;
                     }
                 }
             }
